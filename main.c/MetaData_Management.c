@@ -1,197 +1,413 @@
-include <stdio.h>
-#include <stdbool.h>
+#include <stdio.h>
 #include <stdlib.h>
+#include <stdbool.h>
 #include <string.h>
-#include <time.h>
+#include<time.h>
 
-#define WIDTH 1000
-#define LENGTH 850
-#define FPS 60
-#define COLUMNS 10
-#define SEGMENTS 334
-
-// RGB structure for possible color management in the display (if needed for visualization)
+// Struct definitions
 typedef struct {
-    int r;
-    int b;
-    int g;
-} RGB;
+	char file_name[60];
+	int firstBlock;
+	int nbBloc;
+	int nbProduit;
+} meta;
 
-// Product structure containing product details
-typedef struct produit {
-    int ID;
-    char nom[31];
-    float prix;
+typedef struct {
+	int id;
+	char nom[31];
+	float prix;
 } produit;
 
-// Block structure representing a block in memory (data + metadata)
-typedef struct bloc {
-    int num;
-    int bytes;
-    char produit[SEGMENTS];  // For product data
-    struct bloc *svt;        // Pointer to the next block (for chained files)
-    char metadata[SEGMENTS]; // For metadata (file name, size, etc.)
-    struct bloc *metaNext;   // Pointer to the next metadata block (if needed)
-} bloc;
-
-// Index structure used for indexing files in memory
-typedef struct index {
-    char id[10];
-    bloc *b;
-    int num;
-    struct index *suivant;
-} index;
-
-// Info structure to store information about the files
 typedef struct {
-    bloc *prems;
-    int nbBloc;
-    int nbProduit;
-    int ajout;
-    int supprime;
-} info;
+	bool is_free;
+	int file_id;
+	char data[512]; // Buffer for storing product or metadata
+	int next_block;
+} Block;
 
-// Function to create a new product
-produit* createProduct(char id[9]) {
-    produit *p = (produit*)malloc(sizeof(produit));
-    p->ID = atoi(id);
-    snprintf(p->nom, sizeof(p->nom), "Product %s", id);
-    p->prix = (rand() % 10000) / 100.0; // Random price between 0.00 and 100.00
-    return p;
+// Global variables
+Block *memory;
+int total_blocks;
+int block_size;
+meta metadataTable[100];
+int metadataCount = 0;
+int facteur_de_blocage = 4; // Blocking factor (number of products per buffer)
+
+// Function prototypes
+void initializeMemory(int num_blocks, int b_size);
+void displayMemoryState();
+int allocateBlocks(int file_id, int num_blocks);
+void addMetadata(meta newMeta);
+void writeProductsToDisk(const char *inputFile, const char *diskFile);
+void writeMetadataToDisk(const char *diskFile);
+void displayDiskContents(const char *diskFile);
+void fillProductFile(const char *filename);
+
+// Function implementations
+void initializeMemory(int num_blocks, int b_size) {
+	total_blocks = num_blocks;
+	block_size = b_size;
+	memory = (Block *)malloc(num_blocks * sizeof(Block));
+
+	for (int i = 0; i < num_blocks; i++) {
+		memory[i].is_free = true;
+		memory[i].file_id = 0;
+		memory[i].data[0] = '\0';
+		memory[i].next_block = -1;
+	}
+	printf("Memory initialized with %d blocks of %d bytes each\n", num_blocks, b_size);
 }
 
-// Function to create a new block
-void allocation(info *inf) {
-    bloc *b = (bloc*)malloc(sizeof(bloc));
-    inf->nbBloc++;
-    b->num = inf->nbBloc;
-    b->bytes = 0;
-    b->svt = NULL;
-    b->metaNext = NULL;
-    
-    if (inf->prems == NULL) {
-        inf->prems = b;
+void displayMemoryState() {
+	printf("Memory state:\n");
+	for (int i = 0; i < total_blocks; i++) {
+		if (memory[i].is_free) {
+			printf("[FREE]");
+		} else {
+			printf("[FILE ID: %d]", memory[i].file_id);
+		}
+	}
+	printf("\n");
+}
+
+int allocateBlocks(int file_id, int num_blocks) {
+    int start = -1, count = 0;
+
+    for (int i = 0; i < total_blocks; i++) {
+        if (memory[i].is_free) {
+            if (count == 0) start = i;
+            count++;
+            if (count == num_blocks) break;
+        } else {
+            count = 0; // Reset if a block is not free
+        }
+    }
+
+    if (count < num_blocks) {
+        printf("Failed to allocate %d blocks for file ID %d\n", num_blocks, file_id);
+        return -1; // Allocation failed
+    }
+
+    for (int i = start; i < start + num_blocks; i++) {
+        memory[i].is_free = false;
+        memory[i].file_id = file_id;
+        memset(memory[i].data, 0, sizeof(memory[i].data));
+        memory[i].next_block = (i < start + num_blocks - 1) ? i + 1 : -1;
+    }
+
+    printf("Allocated %d blocks starting at block %d for file ID %d\n", num_blocks, start, file_id);
+    return start;
+}
+
+
+void writeProductsToDisk(const char *inputFile, const char *diskFile) {
+	FILE *input = fopen(inputFile, "r");
+	FILE *disk = fopen(diskFile, "r+");
+
+	if (!input || !disk) {
+		printf("Error opening files for writing\n");
+		return;
+	}
+
+	Block buffer;
+	int bufferCount = 0;
+	char line[128];
+
+	while (fgets(line, sizeof(line), input)) {
+		produit p;
+		sscanf(line, "%d,%30[^,],%f", &p.id, p.nom, &p.prix);
+
+		char productData[128];
+		snprintf(productData, sizeof(productData), "%d,%s,%.2f", p.id, p.nom, p.prix);
+
+		strcat(buffer.data, productData);
+		strcat(buffer.data, "\n");
+		bufferCount++;
+
+		if (bufferCount == facteur_de_blocage) {
+			fwrite(buffer.data, sizeof(char), strlen(buffer.data), disk);
+			memset(buffer.data, 0, sizeof(buffer.data));
+			bufferCount = 0;
+		}
+	}
+
+	if (bufferCount > 0) {
+		fwrite(buffer.data, sizeof(char), strlen(buffer.data), disk);
+	}
+
+	fclose(input);
+	fclose(disk);
+	printf("Products written to disk from %s to %s\n", inputFile, diskFile);
+}
+void deleteFileFromDisk(const char *filename, const char *diskFile) {
+    FILE *disk = fopen(diskFile, "r");
+    FILE *temp = fopen("temp_disk.txt", "w");
+
+    if (!disk || !temp) {
+        printf("Error opening files for file deletion\n");
+        return;
+    }
+
+    char line[128];
+    while (fgets(line, sizeof(line), disk)) {
+        if (strstr(line, filename) == NULL) { // Skip lines containing the filename
+            fprintf(temp, "%s", line);
+        }
+    }
+
+    fclose(disk);
+    fclose(temp);
+    remove(diskFile);
+    rename("temp_disk.txt", diskFile);
+    printf("File %s deleted from disk %s\n", filename, diskFile);
+}
+
+void synchronizeDiskWithFile(const char *filename, const char *diskFile) {
+    writeProductsToDisk(filename, diskFile);
+    printf("Disk synchronized with file %s\n", filename);
+}
+void deleteProductFromFile(const char *filename, int product_id) {
+    FILE *file = fopen(filename, "r");
+    FILE *temp = fopen("temp.txt", "w");
+
+    if (!file || !temp) {
+        printf("Error opening files for deletion\n");
+        return;
+    }
+
+    char line[128];
+    while (fgets(line, sizeof(line), file)) {
+        produit p;
+        sscanf(line, "%d,%30[^,],%f", &p.id, p.nom, &p.prix);
+        if (p.id != product_id) {
+            fprintf(temp, "%s", line);
+        }
+    }
+
+    fclose(file);
+    fclose(temp);
+    remove(filename);
+    rename("temp.txt", filename);
+    printf("Product with ID %d deleted from %s\n", product_id, filename);
+}
+
+
+void writeMetadataToDisk(const char *diskFile) {
+	FILE *disk = fopen(diskFile, "a");
+
+	if (!disk) {
+		printf("Error opening file for writing metadata\n");
+		return;
+	}
+
+	Block buffer;
+	for (int i = 0; i < metadataCount; i++) {
+		char metadataStr[128];
+		snprintf(metadataStr, sizeof(metadataStr), "%s,%d,%d,%d\n", metadataTable[i].file_name, metadataTable[i].firstBlock, metadataTable[i].nbBloc, metadataTable[i].nbProduit);
+
+		strcat(buffer.data, metadataStr);
+
+		if (strlen(buffer.data) + strlen(metadataStr) >= sizeof(buffer.data)) {
+			fwrite(buffer.data, sizeof(char), strlen(buffer.data), disk);
+			memset(buffer.data, 0, sizeof(buffer.data));
+		}
+	}
+
+	if (strlen(buffer.data) > 0) {
+		fwrite(buffer.data, sizeof(char), strlen(buffer.data), disk);
+	}
+
+	fclose(disk);
+	printf("Metadata written to disk in %s\n", diskFile);
+}
+
+void displayDiskContents(const char *diskFile) {
+	FILE *disk = fopen(diskFile, "r");
+
+	if (!disk) {
+		printf("Error opening file for reading\n");
+		return;
+	}
+
+	char line[512];
+	printf("Disk contents:\n");
+	while (fgets(line, sizeof(line), disk)) {
+		printf("%s", line);
+	}
+
+	fclose(disk);
+}
+void addMetadata(meta newMeta) {
+    if (metadataCount < 100) { // Ensure the metadata table doesn't overflow
+        metadataTable[metadataCount++] = newMeta; // Add new metadata to the table
+        printf("Metadata added: %s, Start Block: %d, Blocks: %d, Products: %d\n",
+               newMeta.file_name, newMeta.firstBlock, newMeta.nbBloc, newMeta.nbProduit);
     } else {
-        bloc *t = inf->prems;
-        while (t->svt != NULL) {
-            t = t->svt;
-        }
-        t->svt = b;
+        printf("Metadata table is full. Cannot add new metadata.\n");
     }
 }
 
-// Function to add product data to a block
-void addProductToBlock(info *inf, produit *p) {
-    bloc *b = inf->prems;
-    while (b->svt != NULL) {
-        b = b->svt;
-    }
-    
-    int product_size = snprintf(NULL, 0, "%d,%s,%f", p->ID, p->nom, p->prix);
-    
-    // Check if the block is full
-    if (b->bytes + product_size > SEGMENTS) {
-        bloc *new_block = (bloc*)malloc(sizeof(bloc));
-        new_block->num = inf->nbBloc++;
-        new_block->bytes = 0;
-        new_block->svt = NULL;
-        b->svt = new_block;
-        b = new_block;
-    }
 
-    // Add the product data to the block
-    snprintf(b->produit + b->bytes, SEGMENTS - b->bytes, "%d,%s,%f", p->ID, p->nom, p->prix);
-    b->bytes += product_size;
+void fillProductFile(const char *filename) {
+	FILE *file = fopen(filename, "w");
+	if (!file) {
+		printf("Error creating product file\n");
+		return;
+	}
+
+	int num_products;
+	printf("Enter the number of products to add: ");
+	scanf("%d", &num_products);
+
+	for (int i = 0; i < num_products; i++) {
+		produit p;
+		printf("Enter ID, name, and price for product %d: ", i + 1);
+		scanf("%d,%30[^,],%f", &p.id, p.nom, &p.prix);
+		fprintf(file, "%d,%s,%.2f\n", p.id, p.nom, p.prix);
+	}
+
+	fclose(file);
+	printf("Products saved to %s\n", filename);
 }
-
-// Function to create file metadata
-void createFile(info *inf, const char *filename, int num_records) {
-    bloc *new_block = (bloc*)malloc(sizeof(bloc));
-    new_block->num = inf->nbBloc++;
-    new_block->bytes = 0;
-    new_block->svt = NULL;
-    
-    // Write metadata
-    snprintf(new_block->metadata, SEGMENTS, "File Name: %s, Num Records: %d", filename, num_records);
-    inf->prems = new_block;
-
-    // Add product data to blocks
-    for (int i = 0; i < num_records; i++) {
-        char id[9];
-        snprintf(id, sizeof(id), "%08d", i + 1);
-        produit *p = createProduct(id);
-        addProductToBlock(inf, p);
-        free(p);
+void updateMemoryState() {
+    // Clear all memory blocks first
+    for (int i = 0; i < total_blocks; i++) {
+        memory[i].is_free = true;
+        memory[i].file_id = 0;
+        memory[i].next_block = -1;
+        memset(memory[i].data, 0, sizeof(memory[i].data));
     }
-}
 
-// Function to print block information (for debugging and visualization)
-void printBlockInfo(bloc *b) {
-    while (b != NULL) {
-        printf("Block %d: %d bytes\n", b->num, b->bytes);
-        printf("Data: %s\n", b->produit);
-        b = b->svt;
-    }
-}
-
-// Function to search for a product in the blocks by ID
-bloc* searchProductByID(index *index_table, const char *product_id) {
-    for (int i = 0; i < 10; i++) { // Adjust based on the actual size of the index table
-        if (strcmp(index_table[i].id, product_id) == 0) {
-            return index_table[i].b;
+    // Re-allocate based on metadata
+    for (int i = 0; i < metadataCount; i++) {
+        meta *currentMeta = &metadataTable[i];
+        int startBlock = currentMeta->firstBlock;
+        for (int j = 0; j < currentMeta->nbBloc; j++) {
+            memory[startBlock + j].is_free = false;
+            memory[startBlock + j].file_id = i + 1;
+            memory[startBlock + j].next_block = (j < currentMeta->nbBloc - 1) ? startBlock + j + 1 : -1;
         }
     }
-    printf("Product not found!\n");
-    return NULL;
 }
 
-// Function to delete a product (logical deletion)
-void logicalDeleteProduct(produit *p) {
-    p->ID = -1; // Mark as deleted
-    printf("Product with ID %d has been logically deleted.\n", p->ID);
-}
-
-// Function to display file metadata
-void displayMetadata(bloc *b) {
-    printf("Metadata: %s\n", b->metadata);
-}
-
-// Function to free memory for index
-void freeIndex(index *a) {
-    free(a);
-}
-
-// Main program to demonstrate file creation, product insertion, etc.
 int main() {
     srand(time(NULL));
+    initializeMemory(10, 512);
 
-    // Initialize info structure to manage the file and blocks
-    info inf = {NULL, 0, 0, 0, 0};
-    
-    // Create a file and add products
-    createFile(&inf, "ProductsFile", 5);
-    
-    // Print block information (to show data and metadata)
-    printBlockInfo(inf.prems);
-    
-    // Create and add a product
-    produit *newProduct = createProduct("00006");
-    addProductToBlock(&inf, newProduct);
-    free(newProduct);
-    
-    // Search for a product by ID
-    char search_id[10] = "00006";
-    bloc *found_block = searchProductByID(NULL, search_id); // Assuming index_table is available
-    if (found_block != NULL) {
-        printBlockInfo(found_block);
+    int choice;
+
+    do {
+        printf("\n--- File System Menu ---\n");
+        printf("1. Add more products to an existing file\n");
+        printf("2. Create a new file and add products\n");
+        printf("3. Delete a product from an existing file\n");
+        printf("4. Delete an entire file from the disk\n");
+        printf("5. Display disk contents\n");
+        printf("6. Display memory state\n");
+        printf("0. Exit\n");
+        printf("Enter your choice: ");
+        scanf("%d", &choice);
+
+        switch (choice) {
+            case 1: {
+                char filename[50];
+                printf("Enter the name of the existing file: ");
+                scanf("%s", filename);
+                fillProductFile(filename);
+                synchronizeDiskWithFile(filename, "disk.txt");
+                displayDiskContents("disk.txt");
+                writeMetadataToDisk("disk.txt");
+                updateMemoryState(); // Update memory after changes
+                displayMemoryState();
+                break;
+            }
+            case 2: {
+    char filename[50];
+    printf("Enter the name for the new file: ");
+    scanf("%s", filename);
+    FILE *newFile = fopen(filename, "w");
+    if (newFile) {
+        fclose(newFile);
+        fillProductFile(filename);
+
+        int numBlocks;
+        printf("Enter the number of blocks to allocate for the new file: ");
+        scanf("%d", &numBlocks);
+        int startBlock = allocateBlocks(metadataCount + 1, numBlocks);
+
+        if (startBlock != -1) {
+            meta newMeta;
+            snprintf(newMeta.file_name, sizeof(newMeta.file_name), "%s", filename);
+            newMeta.firstBlock = startBlock;
+            newMeta.nbBloc = numBlocks;
+            newMeta.nbProduit = 0; // You can update this with actual product count if needed
+            addMetadata(newMeta);
+
+            synchronizeDiskWithFile(filename, "disk.txt");
+            writeMetadataToDisk("disk.txt");
+            updateMemoryState(); // Ensure all blocks are allocated properly
+            displayDiskContents("disk.txt");
+            displayMemoryState();
+        } else {
+            printf("Failed to allocate blocks for the new file.\n");
+        }
+    } else {
+        printf("Error creating the new file.\n");
     }
-    
-    // Logical deletion of a product
-    logicalDeleteProduct(newProduct);
+    break;
+}
 
-    // Free allocated memory (clean up)
-    freeIndex(NULL); // Assuming index table is initialized elsewhere
+            case 3: {
+                char filename[50];
+                int product_id;
+                printf("Enter the name of the file to delete the product from: ");
+                scanf("%s", filename);
+                printf("Enter the ID of the product to delete: ");
+                scanf("%d", &product_id);
+                deleteProductFromFile(filename, product_id);
+                synchronizeDiskWithFile(filename, "disk.txt");
+                displayDiskContents("disk.txt");
+                updateMemoryState(); // Update memory after changes
+                displayMemoryState();
+                break;
+            }
+            case 4: {
+                char filename[50];
+                printf("Enter the name of the file to delete from disk: ");
+                scanf("%s", filename);
+                deleteFileFromDisk(filename, "disk.txt");
+
+                // Remove the file's metadata
+                for (int i = 0; i < metadataCount; i++) {
+                    if (strcmp(metadataTable[i].file_name, filename) == 0) {
+                        // Shift metadata entries to remove the deleted file
+                        for (int j = i; j < metadataCount - 1; j++) {
+                            metadataTable[j] = metadataTable[j + 1];
+                        }
+                        metadataCount--;
+                        break;
+                    }
+                }
+
+                updateMemoryState(); // Update memory after changes
+                displayDiskContents("disk.txt");
+                displayMemoryState();
+                break;
+            }
+            case 5:
+                displayDiskContents("disk.txt");
+                break;
+            case 6:
+                displayMemoryState();
+                break;
+            case 0:
+                printf("Exiting program.\n");
+                break;
+            default:
+                printf("Invalid choice. Please try again.\n");
+                break;
+        }
+    } while (choice != 0);
 
     return 0;
 }
-
